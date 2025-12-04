@@ -1,40 +1,51 @@
+resource "aws_vpc" "this" {
+  cidr_block           = var.vpc_cidr
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+
+  tags = merge(var.tags, { Name = "${var.name}-vpc" })
+}
+
 data "aws_availability_zones" "available" {}
 
-resource "aws_vpc" "this" {
-  cidr_block = var.vpc_cidr
-  tags = { Name = "${var.name}-vpc" }
+locals {
+  subnets_map = { for s in var.subnets : s.name => s }
 }
 
-resource "aws_internet_gateway" "igw" {
-  vpc_id = aws_vpc.this.id
-  tags   = { Name = "${var.name}-igw" }
-}
+resource "aws_subnet" "this" {
+  for_each = local.subnets_map
 
-resource "aws_subnet" "public" {
   vpc_id                  = aws_vpc.this.id
-  cidr_block              = var.public_subnet_cidr
-  availability_zone       = element(data.aws_availability_zones.available.names, 0)
-  map_public_ip_on_launch = true
-  tags = { Name = "${var.name}-public-subnet" }
+  cidr_block              = each.value.cidr
+  availability_zone       = lookup(each.value, "az", element(data.aws_availability_zones.available.names, 0))
+  map_public_ip_on_launch = each.value.public
+
+  tags = merge(var.tags, { Name = "${var.name}-${each.key}-subnet", SubnetRole = each.value.public ? "public" : "private" })
 }
 
-resource "aws_subnet" "private" {
-  vpc_id            = aws_vpc.this.id
-  cidr_block        = var.private_subnet_cidr
-  availability_zone = element(data.aws_availability_zones.available.names, 0)
-  tags = { Name = "${var.name}-private-subnet" }
-}
-
-resource "aws_route_table" "public_rt" {
+# Create IGW if any public subnet exists
+resource "aws_internet_gateway" "igw" {
+  count  = length([for s in var.subnets : s if s.public]) > 0 ? 1 : 0
   vpc_id = aws_vpc.this.id
+  tags   = merge(var.tags, { Name = "${var.name}-igw" })
+}
+
+# Public route table if public subnets exist
+resource "aws_route_table" "public_rt" {
+  count  = length([for s in var.subnets : s if s.public]) > 0 ? 1 : 0
+  vpc_id = aws_vpc.this.id
+
   route {
     cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.igw.id
+    gateway_id = aws_internet_gateway.igw[0].id
   }
-  tags = { Name = "${var.name}-public-rt" }
+
+  tags = merge(var.tags, { Name = "${var.name}-public-rt" })
 }
 
 resource "aws_route_table_association" "public_assoc" {
-  subnet_id      = aws_subnet.public.id
-  route_table_id = aws_route_table.public_rt.id
+  for_each = { for k, s in local.subnets_map : k => s if s.public }
+
+  subnet_id      = aws_subnet.this[each.key].id
+  route_table_id = aws_route_table.public_rt[0].id
 }

@@ -37,3 +37,18 @@ variable "private_instance_count" {
   type    = number
   default = 2
 }
+
+variable "environment" {
+  type    = string
+  default = "dev"
+}
+
+variable "owner" {
+  type    = string
+  default = ""
+}
+
+variable "project" {
+  type    = string
+  default = ""
+}

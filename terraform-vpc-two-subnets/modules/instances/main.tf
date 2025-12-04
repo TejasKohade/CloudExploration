@@ -12,7 +12,36 @@ data "aws_vpc" "vpc" {
   id = var.vpc_id
 }
 
-# Public Security Group
+locals {
+  common_tags = var.tags
+
+  instances_list = flatten([
+    for subnet_name, count in var.instances_per_subnet : [
+      for idx in range(count) : {
+        key    = "${subnet_name}-${idx}"
+        subnet = subnet_name
+        idx    = idx
+      }
+    ]
+  ])
+
+  instances_map = {
+    for inst in local.instances_list :
+    inst.key => inst
+  }
+
+  ordered_keys = sort(keys(local.instances_map))
+  number_map = {
+    for index, key in local.ordered_keys :
+    key => index + 1
+  }
+
+  subnet_is_public = {
+    for subnet_name, _ in var.subnet_ids :
+    subnet_name => can(regex("(?i)public|pub", subnet_name))
+  }
+}
+
 resource "aws_security_group" "public_sg" {
   name        = "${var.name}-public-sg"
   description = "Allow SSH and HTTP"
@@ -38,9 +67,13 @@ resource "aws_security_group" "public_sg" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
+
+  tags = merge(
+    local.common_tags,
+    { Name = "${var.name}-public-sg" }
+  )
 }
 
-# Private Security Group
 resource "aws_security_group" "private_sg" {
   name        = "${var.name}-private-sg"
   description = "Allow internal traffic"
@@ -59,38 +92,37 @@ resource "aws_security_group" "private_sg" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
+
+  tags = merge(
+    local.common_tags,
+    { Name = "${var.name}-private-sg" }
+  )
 }
 
-resource "aws_instance" "public" {
-  count         = var.public_instance_count
+resource "aws_instance" "this" {
+  for_each = local.instances_map
+
   ami           = data.aws_ami.amazon_linux_2.id
   instance_type = var.instance_type
-  subnet_id     = var.public_subnet_id
-  associate_public_ip_address = true
-  vpc_security_group_ids = [aws_security_group.public_sg.id]
 
-  tags = {
-    Name = "${var.name}-public-${count.index + 1}"
-  }
+  subnet_id = lookup(var.subnet_ids, each.value.subnet)
+
+  associate_public_ip_address = local.subnet_is_public[each.value.subnet]
+
+  vpc_security_group_ids = local.subnet_is_public[each.value.subnet]? [aws_security_group.public_sg.id] : [aws_security_group.private_sg.id]
+
+  tags = merge(
+    local.common_tags,
+    {
+      Name            = "${var.name}-${each.key}"
+      Role            = local.subnet_is_public[each.value.subnet] ? "public-web" : "private-app"
+      InstanceOrdinal = tostring(local.number_map[each.key])
+      SubnetName      = each.value.subnet
+    }
+  )
 
   user_data = templatefile("${path.module}/templates/public.sh", {
-    instance_number = count.index + 1
+    instance_number = local.number_map[each.key]
   })
 }
 
-resource "aws_instance" "private" {
-  count         = var.private_instance_count
-  ami           = data.aws_ami.amazon_linux_2.id
-  instance_type = var.instance_type
-  subnet_id     = var.private_subnet_id
-  associate_public_ip_address = false
-  vpc_security_group_ids = [aws_security_group.private_sg.id]
-
-  tags = {
-    Name = "${var.name}-private-${count.index + 1}"
-  }
-
-  user_data = templatefile("${path.module}/templates/private.sh", {
-    instance_number = var.public_instance_count + count.index + 1
-  })
-}
